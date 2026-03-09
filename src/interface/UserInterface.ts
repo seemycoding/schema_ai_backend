@@ -14,3 +14,10 @@ export interface User {
     email: string;
     password: string;
   }
+
+  export interface SocialUser {
+    provider: string;
+    providerId: string;
+    email: string;
+    username: string;
+}

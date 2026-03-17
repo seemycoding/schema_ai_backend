@@ -18,6 +18,7 @@ interface SchemaVersionListRow {
   id: number;
   schema_id: number;
   version_number: number;
+  schema_json?: string;
   notes: string | null;
   created_at: Date;
   created_by_user_id: number;
@@ -38,6 +39,12 @@ const normalizeSchemaJson = (schemaJson: string) => {
   } catch {
     return schemaJson.trim();
   }
+};
+
+const toVersionNote = (input?: string | null, fallback = 'Canvas update') => {
+  const text = String(input || '').trim().replace(/\s+/g, ' ');
+  if (!text) return fallback;
+  return text.length > 90 ? `${text.slice(0, 87)}...` : text;
 };
 
 export const saveSchema = async (
@@ -317,10 +324,7 @@ export const updateSchema = async (req: Request, res: Response) => {
           [schemaId]
         );
         const nextVersion = Number(nextVersionResult.rows[0]?.next_version || '1');
-        const versionNotes =
-          typeof version_note === 'string' && version_note.trim()
-            ? version_note.trim()
-            : 'Updated from builder';
+        const versionNotes = toVersionNote(version_note, 'Canvas update');
 
         const createVersionResult = await client.query<SchemaVersion>(
           `INSERT INTO SchemaVersions (schema_id, version_number, schema_json, notes, created_at, created_by_user_id)
@@ -392,16 +396,22 @@ export const getSchemaVersions = async (req: Request, res: Response) => {
     }
 
     const versionsResult = await pool.query<SchemaVersionListRow>(
-      `SELECT id, schema_id, version_number, notes, created_at, created_by_user_id
+      `SELECT id, schema_id, version_number, schema_json, notes, created_at, created_by_user_id
        FROM SchemaVersions
        WHERE schema_id = $1
        ORDER BY version_number ASC`,
       [schemaId]
     );
 
+    const filteredVersions = versionsResult.rows.filter((version, index, all) => {
+      if (index === 0) return true;
+      const previous = all[index - 1];
+      return normalizeSchemaJson(version.schema_json || '') !== normalizeSchemaJson(previous.schema_json || '');
+    }).map(({ schema_json, ...version }) => version);
+
     return res.status(200).json({
       schema: schemaResult.rows[0],
-      versions: versionsResult.rows,
+      versions: filteredVersions,
     });
   } catch (error: any) {
     console.error('Error fetching schema versions:', error.message);

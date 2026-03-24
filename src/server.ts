@@ -4,7 +4,7 @@ import { startCollabServer } from './collabServer';
 
 dotenv.config();
 
-const PORT = process.env.PORT;
+const PORT = Number(process.env.PORT || 8000);
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);

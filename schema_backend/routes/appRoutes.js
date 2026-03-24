@@ -1,0 +1,28 @@
+"use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = __importDefault(require("express"));
+const auth_1 = require("../middleware/auth");
+const schemaController_1 = require("../controllers/schemaController");
+const aiController_1 = require("../controllers/aiController");
+const profileController_1 = require("../controllers/profileController");
+const shareController_1 = require("../controllers/shareController");
+const chatController_1 = require("../controllers/chatController");
+const router = express_1.default.Router();
+router.post('/schemas', auth_1.authMiddleware, schemaController_1.saveSchema);
+router.get('/schemas', auth_1.authMiddleware, schemaController_1.getSchemas);
+router.get('/schemas/usage', auth_1.authMiddleware, schemaController_1.getSchemaUsage);
+router.put('/schemas/:id', auth_1.authMiddleware, schemaController_1.updateSchema);
+router.get('/schemas/:id/versions', auth_1.authMiddleware, schemaController_1.getSchemaVersions);
+router.get('/schemas/:id/versions/:versionId', auth_1.authMiddleware, schemaController_1.getSchemaVersionDetails);
+router.post('/ai/generate-diagram', auth_1.authMiddleware, aiController_1.generateDiagram);
+router.post('/share/invite', auth_1.authMiddleware, shareController_1.sendShareInvites);
+router.post('/share/register-link', auth_1.authMiddleware, shareController_1.registerShareLinkAccess);
+router.get('/schemas/shared-with-me', auth_1.authMiddleware, shareController_1.getSharedWithMeSchemas);
+router.get('/schemas/:id/chat-history', auth_1.authMiddleware, chatController_1.getSchemaChatHistory);
+router.post('/schemas/:id/chat-history', auth_1.authMiddleware, chatController_1.upsertSchemaChatMessage);
+router.get('/profile', auth_1.authMiddleware, profileController_1.getProfile);
+router.delete('/profile', auth_1.authMiddleware, profileController_1.deleteProfile);
+exports.default = router;

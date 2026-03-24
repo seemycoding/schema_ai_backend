@@ -32,6 +32,23 @@ interface SharedSchemaRow {
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+const getActiveCollaboratorCount = async (schemaId: number) => {
+  const result = await pool.query<{ count: string }>(
+    `SELECT COUNT(*)::text AS count
+     FROM (
+       SELECT DISTINCT COALESCE(shared_with_user_id::text, lower(shared_with_email))
+       FROM SchemaShares
+       WHERE schema_id = $1
+         AND (
+           shared_with_user_id IS NOT NULL
+           OR nullif(lower(coalesce(shared_with_email, '')), '') IS NOT NULL
+         )
+     ) collaborators`,
+    [schemaId]
+  );
+  return Number(result.rows[0]?.count || '0');
+};
+
 const getMailTransporter = () => {
   const host = process.env.SMTP_HOST;
   const port = Number(process.env.SMTP_PORT || 587);
@@ -147,6 +164,25 @@ export const sendShareInvites = async (req: Request<{}, {}, InviteBody>, res: Re
       return res.status(403).json({ message: 'You can only share your own schemas.' });
     }
 
+    if (plan.max_collaborators_per_diagram !== null) {
+      const currentCount = await getActiveCollaboratorCount(schemaId);
+      const uniqueRequested = new Set(emails);
+      const existingMatches = await pool.query<{ match_key: string }>(
+        `SELECT DISTINCT COALESCE(shared_with_user_id::text, lower(shared_with_email)) AS match_key
+         FROM SchemaShares
+         WHERE schema_id = $1
+           AND lower(coalesce(shared_with_email, '')) = ANY($2::text[])`,
+        [schemaId, Array.from(uniqueRequested)]
+      );
+      const existingKeys = new Set(existingMatches.rows.map((row) => row.match_key));
+      const newSharesNeeded = Array.from(uniqueRequested).filter((email) => !existingKeys.has(email)).length;
+      if (currentCount + newSharesNeeded > plan.max_collaborators_per_diagram) {
+        return res.status(403).json({
+          message: `Your ${plan.plan_name} plan allows up to ${plan.max_collaborators_per_diagram} collaborators per diagram.`,
+        });
+      }
+    }
+
     const transporter = getMailTransporter();
     const from = process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER || 'no-reply@schema.ai';
     const html = getInviteTemplate({ ownerName, inviteLink, permission, diagramType });
@@ -259,6 +295,25 @@ export const registerShareLinkAccess = async (req: Request<{}, {}, RegisterLinkB
   const ownerUserId = schemaOwnerResult.rows[0].user_id;
   if (ownerUserId === userId) {
     return res.status(200).json({ message: 'Owner access already granted.' });
+  }
+
+  const ownerPlan = await getPlanFeaturesForUser(ownerUserId);
+  if (ownerPlan.max_collaborators_per_diagram !== null) {
+    const currentCount = await getActiveCollaboratorCount(schemaId);
+    const existingAccess = await pool.query<{ id: number }>(
+      `SELECT id
+       FROM SchemaShares
+       WHERE schema_id = $1
+         AND (shared_with_user_id = $2 OR lower(coalesce(shared_with_email, '')) = $3)
+       LIMIT 1`,
+      [schemaId, userId, userEmail]
+    );
+    const needsNewShare = existingAccess.rows.length === 0;
+    if (needsNewShare && currentCount >= ownerPlan.max_collaborators_per_diagram) {
+      return res.status(403).json({
+        message: `This diagram has reached the collaborator limit for the ${ownerPlan.plan_name} plan.`,
+      });
+    }
   }
 
   const updated = await pool.query(

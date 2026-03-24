@@ -1,11 +1,12 @@
 import { spawn, ChildProcess } from 'child_process';
+import path from 'path';
 
 const toBool = (value?: string) => String(value).toLowerCase() === 'true';
 
 export const startCollabServer = (): ChildProcess | null => {
   const enabled = process.env.COLLAB_SERVER_ENABLED
     ? toBool(process.env.COLLAB_SERVER_ENABLED)
-    : true;
+    : process.env.NODE_ENV !== 'production';
 
   if (!enabled) {
     console.log('Collab server disabled via COLLAB_SERVER_ENABLED=false');
@@ -14,8 +15,9 @@ export const startCollabServer = (): ChildProcess | null => {
 
   const host = process.env.COLLAB_SERVER_HOST || '0.0.0.0';
   const port = process.env.COLLAB_SERVER_PORT || '1234';
-  const command = process.platform === 'win32' ? 'npx.cmd' : 'npx';
-  const args = ['y-websocket'];
+  const command = process.execPath;
+  const serverScript = path.resolve(__dirname, '../node_modules/@y/websocket-server/src/server.js');
+  const args = [serverScript];
 
   console.log(`Starting Yjs collab server on ws://${host}:${port}`);
   const child = spawn(command, args, {

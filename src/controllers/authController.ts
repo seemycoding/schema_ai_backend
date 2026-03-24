@@ -2,6 +2,7 @@
 import { Request, Response } from 'express';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
+import crypto from 'crypto';
 import { pool } from '../config/db';
 import { NewUserRegistration,User,SocialUser } from '../interface/UserInterface';
 import axios from 'axios'; // Import axios
@@ -25,6 +26,11 @@ const FRONTEND_AUTH_CALLBACK_URL =
   process.env.FRONTEND_AUTH_CALLBACK_URL ||
   (frontendBaseUrl ? `${frontendBaseUrl}/auth/callback` : '') ||
   'http://localhost:5173/auth/callback';
+const FRONTEND_RESET_PASSWORD_URL =
+  process.env.FRONTEND_RESET_PASSWORD_URL ||
+  (frontendBaseUrl ? `${frontendBaseUrl}/reset-password` : '') ||
+  'http://localhost:5173/reset-password';
+const PASSWORD_RESET_TTL_MINUTES = Number(process.env.PASSWORD_RESET_TTL_MINUTES || '30');
 
 const resolveJwtExpiry = (raw: string): string | number => {
   // If raw is all digits, treat it as seconds to avoid ms-parsing pitfalls (e.g. "1" => 1ms).
@@ -42,6 +48,50 @@ const generateJwtToken = (user: { id: number; username: string; email: string; p
     { expiresIn: resolveJwtExpiry(JWT_EXPIRES_IN) as any }
   );
 };
+
+const getMailTransporter = () => {
+  const host = process.env.SMTP_HOST;
+  const port = Number(process.env.SMTP_PORT || 587);
+  const user = process.env.SMTP_USER;
+  const pass = process.env.SMTP_PASS;
+  const secure = String(process.env.SMTP_SECURE || 'false').toLowerCase() === 'true';
+
+  if (!host || !user || !pass) {
+    throw new Error('SMTP credentials are not configured.');
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const nodemailer = require('nodemailer');
+  return nodemailer.createTransport({
+    host,
+    port,
+    secure,
+    auth: { user, pass },
+  });
+};
+
+const hashResetToken = (token: string) => crypto.createHash('sha256').update(token).digest('hex');
+
+const buildResetPasswordTemplate = (resetLink: string) => `
+  <div style="font-family: Arial, sans-serif; background:#f4f6f8; padding:24px;">
+    <div style="max-width:640px; margin:0 auto; background:#ffffff; border:1px solid #e5e7eb; border-radius:12px; overflow:hidden;">
+      <div style="background:#0f172a; color:#ffffff; padding:16px 20px; display:flex; align-items:center; gap:12px;">
+        <div style="width:36px; height:36px; border-radius:8px; background:#1d4ed8; display:flex; align-items:center; justify-content:center; font-weight:700;">SA</div>
+        <div style="font-size:20px; font-weight:700;">Schema.AI</div>
+      </div>
+      <div style="padding:24px 20px; color:#111827; line-height:1.6;">
+        <p style="margin:0 0 12px 0;">A password reset was requested for your account.</p>
+        <p style="margin:0 0 16px 0;">Use the link below to set a new password. This link expires in ${PASSWORD_RESET_TTL_MINUTES} minutes.</p>
+        <p style="margin:0 0 20px 0;">
+          <a href="${resetLink}" style="background:#1d4ed8; color:#ffffff; padding:10px 14px; border-radius:8px; text-decoration:none; display:inline-block;">Reset Password</a>
+        </p>
+        <p style="font-size:13px; color:#4b5563; margin:0;">
+          If the button does not work, copy and paste this URL in your browser:<br/>
+          <a href="${resetLink}">${resetLink}</a>
+        </p>
+      </div>
+    </div>
+  </div>`;
 
 
 
@@ -214,6 +264,114 @@ export const loginUser = async (req: Request<{}, {}, Pick<NewUserRegistration, '
   } catch (error: any) {
     console.error('Error during user login:', error.message);
     res.status(500).json({ message: 'Internal Server Error' });
+  }
+};
+
+export const forgotPassword = async (req: Request, res: Response) => {
+  const email = String(req.body?.email || '').trim().toLowerCase();
+
+  if (!email) {
+    return res.status(400).json({ message: 'Email is required.' });
+  }
+
+  try {
+    const userResult = await pool.query<User>(
+      'SELECT id, email, username, plan_id, password_hash FROM Users WHERE lower(email) = $1',
+      [email]
+    );
+
+    if (!userResult.rows.length) {
+      return res.status(200).json({
+        message: 'If an account with that email exists, a reset link has been sent.',
+      });
+    }
+
+    const user = userResult.rows[0];
+    const rawToken = crypto.randomBytes(32).toString('hex');
+    const tokenHash = hashResetToken(rawToken);
+    const expiresAt = new Date(Date.now() + PASSWORD_RESET_TTL_MINUTES * 60 * 1000);
+
+    await pool.query(
+      'UPDATE PasswordResetTokens SET used_at = NOW() WHERE user_id = $1 AND used_at IS NULL',
+      [user.id]
+    );
+    await pool.query(
+      `INSERT INTO PasswordResetTokens (user_id, token_hash, expires_at, created_at)
+       VALUES ($1, $2, $3, NOW())`,
+      [user.id, tokenHash, expiresAt]
+    );
+
+    const resetLink = `${FRONTEND_RESET_PASSWORD_URL}?token=${rawToken}`;
+    const transporter = getMailTransporter();
+    const from = process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER || 'no-reply@schema.ai';
+
+    await transporter.sendMail({
+      from,
+      to: user.email,
+      subject: 'Reset your Schema.AI password',
+      html: buildResetPasswordTemplate(resetLink),
+    });
+
+    return res.status(200).json({
+      message: 'If an account with that email exists, a reset link has been sent.',
+    });
+  } catch (error: any) {
+    console.error('Error sending password reset email:', error.message);
+    return res.status(500).json({ message: 'Unable to process password reset request.' });
+  }
+};
+
+export const resetPassword = async (req: Request, res: Response) => {
+  const token = String(req.body?.token || '').trim();
+  const password = String(req.body?.password || '');
+
+  if (!token || !password) {
+    return res.status(400).json({ message: 'Token and password are required.' });
+  }
+
+  if (password.length < 8 || !/[A-Z]/.test(password) || !/[a-z]/.test(password) || !/[0-9]/.test(password) || !/[!@#$%^&*()]/.test(password)) {
+    return res.status(400).json({
+      message: 'Password must be at least 8 characters long and contain uppercase, lowercase, number, and special character.'
+    });
+  }
+
+  const tokenHash = hashResetToken(token);
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+    const tokenResult = await client.query<{ id: number; user_id: number; expires_at: Date; used_at: Date | null }>(
+      `SELECT id, user_id, expires_at, used_at
+       FROM PasswordResetTokens
+       WHERE token_hash = $1
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [tokenHash]
+    );
+
+    if (!tokenResult.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'Invalid or expired reset token.' });
+    }
+
+    const resetRow = tokenResult.rows[0];
+    if (resetRow.used_at || new Date(resetRow.expires_at).getTime() < Date.now()) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'Invalid or expired reset token.' });
+    }
+
+    const passwordHash = await bcrypt.hash(password, 10);
+    await client.query('UPDATE Users SET password_hash = $1 WHERE id = $2', [passwordHash, resetRow.user_id]);
+    await client.query('UPDATE PasswordResetTokens SET used_at = NOW() WHERE user_id = $1 AND used_at IS NULL', [resetRow.user_id]);
+    await client.query('COMMIT');
+
+    return res.status(200).json({ message: 'Password reset successful.' });
+  } catch (error: any) {
+    await client.query('ROLLBACK');
+    console.error('Error resetting password:', error.message);
+    return res.status(500).json({ message: 'Unable to reset password.' });
+  } finally {
+    client.release();
   }
 };
 

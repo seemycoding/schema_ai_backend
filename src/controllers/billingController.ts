@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import axios from 'axios';
 import crypto from 'crypto';
+import jwt from 'jsonwebtoken';
 import { pool } from '../config/db';
 
 interface BillingPlan {
@@ -9,8 +10,15 @@ interface BillingPlan {
   name: string;
   amount_inr: number;
   max_diagrams: number | null;
+  max_memory_messages: number | null;
+  context_window_messages: number | null;
+  max_collaborators_per_diagram: number | null;
+  version_retention_days: number | null;
   has_collaboration: boolean;
+  has_version_history: boolean;
+  is_paid: boolean;
   description: string;
+  features: string[];
 }
 
 interface RazorpayPaymentLink {
@@ -25,7 +33,12 @@ interface PlanRow {
   id: number;
   name: string;
   max_diagrams: number;
+  max_memory_messages: number | null;
+  context_window_messages: number | null;
+  max_collaborators_per_diagram: number | null;
+  version_retention_days: number | null;
   has_collaboration: boolean;
+  has_version_history: boolean;
   price: string | number;
   description: string | null;
 }
@@ -37,6 +50,28 @@ const getRazorpayCreds = () => {
     throw new Error('Razorpay credentials not configured');
   }
   return { keyId, keySecret };
+};
+
+const JWT_SECRET = process.env.JWT_SECRET || '';
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '1h';
+
+const resolveJwtExpiry = (raw: string): string | number => {
+  if (/^\d+$/.test(raw)) {
+    return Number(raw);
+  }
+  return raw;
+};
+
+const generateBillingJwtToken = (user: { id: number; username: string; email: string; plan_id: number }) => {
+  if (!JWT_SECRET) {
+    throw new Error('JWT secret is not configured.');
+  }
+
+  return jwt.sign(
+    { id: user.id, username: user.username, email: user.email, plan_id: user.plan_id },
+    JWT_SECRET,
+    { expiresIn: resolveJwtExpiry(JWT_EXPIRES_IN) as any }
+  );
 };
 
 const getFrontendBaseUrl = () => {
@@ -70,20 +105,60 @@ const toPlanKey = (name: string): string => {
 };
 
 const mapPlanRow = (row: PlanRow): BillingPlan => {
+  const maxDiagrams = row.max_diagrams >= 0 ? row.max_diagrams : null;
+  const isPaid = toNumber(row.price) > 0 || Boolean(row.has_collaboration) || Boolean(row.has_version_history);
+  const features: string[] = [];
+
+  if (maxDiagrams !== null) {
+    features.push(`Up to ${maxDiagrams} diagrams`);
+  } else {
+    features.push('Unlimited diagrams');
+  }
+
+  features.push('AI generation for ER and system design diagrams');
+  features.push(`Memory context up to ${row.max_memory_messages || 0} messages`);
+
+  if (isPaid) {
+    features.push(
+      row.max_collaborators_per_diagram === null
+        ? 'Unlimited collaborators per diagram'
+        : `Up to ${row.max_collaborators_per_diagram} collaborators per diagram`
+    );
+    features.push('Share access and live share edit');
+    features.push(
+      row.version_retention_days === null
+        ? 'Unlimited version history retention'
+        : `Version history retained for ${row.version_retention_days} days`
+    );
+    features.push('TypeORM export and advanced SQL targets');
+    features.push('Shared-with-me access and active collaborators panel');
+  } else {
+    features.push('Single-user editing and export');
+    features.push('SQL export for MySQL and PostgreSQL');
+    features.push('No share access, live edit, or version history');
+  }
+
   return {
     id: row.id,
     key: toPlanKey(row.name),
     name: row.name,
     amount_inr: toNumber(row.price),
-    max_diagrams: row.max_diagrams >= 0 ? row.max_diagrams : null,
+    max_diagrams: maxDiagrams,
+    max_memory_messages: row.max_memory_messages,
+    context_window_messages: row.context_window_messages,
+    max_collaborators_per_diagram: row.max_collaborators_per_diagram,
+    version_retention_days: row.version_retention_days,
     has_collaboration: Boolean(row.has_collaboration),
+    has_version_history: Boolean(row.has_version_history),
+    is_paid: isPaid,
     description: row.description || '',
+    features,
   };
 };
 
 const getPlanById = async (planId: number): Promise<BillingPlan | null> => {
   const result = await pool.query<PlanRow>(
-    `SELECT id, name, max_diagrams, has_collaboration, price, description
+    `SELECT id, name, max_diagrams, max_memory_messages, context_window_messages, max_collaborators_per_diagram, version_retention_days, has_collaboration, has_version_history, price, description
      FROM Plans
      WHERE id = $1`,
     [planId]
@@ -99,7 +174,7 @@ const getPlanById = async (planId: number): Promise<BillingPlan | null> => {
 export const getBillingPlans = async (_req: Request, res: Response) => {
   try {
     const result = await pool.query<PlanRow>(
-      `SELECT id, name, max_diagrams, has_collaboration, price, description
+      `SELECT id, name, max_diagrams, max_memory_messages, context_window_messages, max_collaborators_per_diagram, version_retention_days, has_collaboration, has_version_history, price, description
        FROM Plans
        ORDER BY price ASC, id ASC`
     );
@@ -235,6 +310,9 @@ export const getPaymentStatus = async (req: Request, res: Response) => {
     const entity = response.data;
     const notes = entity.notes || {};
 
+    let refreshedToken: string | null = null;
+    let updatedUser: { id: number; username: string; email: string; plan_id: number } | null = null;
+
     if (entity.status === 'paid') {
       const paidUserId = Number(notes.user_id || userId);
       const planId = Number(notes.plan_id || 0);
@@ -242,6 +320,14 @@ export const getPaymentStatus = async (req: Request, res: Response) => {
 
       if (selectedPlan && paidUserId === userId) {
         await pool.query('UPDATE Users SET plan_id = $1 WHERE id = $2', [selectedPlan.id, userId]);
+        const refreshedUserResult = await pool.query<{ id: number; username: string; email: string; plan_id: number }>(
+          'SELECT id, username, email, plan_id FROM Users WHERE id = $1',
+          [userId]
+        );
+        updatedUser = refreshedUserResult.rows[0] || null;
+        if (updatedUser) {
+          refreshedToken = generateBillingJwtToken(updatedUser);
+        }
       }
     }
 
@@ -250,6 +336,8 @@ export const getPaymentStatus = async (req: Request, res: Response) => {
       status: entity.status,
       amount: entity.amount,
       notes: entity.notes,
+      user: updatedUser,
+      token: refreshedToken,
     });
   } catch (error: any) {
     console.error('Razorpay get payment status error:', error?.response?.data || error.message);

@@ -24,6 +24,44 @@ interface SchemaVersionListRow {
   created_by_user_id: number;
 }
 
+type QueryableClient = {
+  query: (text: string, params?: any[]) => Promise<any>;
+};
+
+const cleanupExpiredVersions = async (
+  client: QueryableClient,
+  schemaId: number,
+  retentionDays: number | null
+) => {
+  if (retentionDays === null || retentionDays <= 0) {
+    return;
+  }
+
+  await client.query(
+    `DELETE FROM SchemaVersions
+     WHERE schema_id = $1
+       AND version_number > 1
+       AND created_at < NOW() - ($2::text || ' days')::interval`,
+    [schemaId, retentionDays]
+  );
+
+  await client.query(
+    `UPDATE Schemas s
+     SET current_version_id = latest.id,
+         updated_at = NOW()
+     FROM (
+       SELECT id
+       FROM SchemaVersions
+       WHERE schema_id = $1
+       ORDER BY version_number DESC
+       LIMIT 1
+     ) latest
+     WHERE s.id = $1
+       AND s.current_version_id IS DISTINCT FROM latest.id`,
+    [schemaId]
+  );
+};
+
 const parseSchemaJson = (schemaJson: string) => {
   try {
     JSON.parse(schemaJson);
@@ -75,7 +113,6 @@ export const saveSchema = async (
 
   try {
     await client.query('BEGIN');
-
     const plan = await getPlanFeaturesForUser(userId, req.user?.plan_id);
     const usageResult = await client.query<SchemaCountRow>(
       'SELECT COUNT(*)::text AS count FROM Schemas WHERE user_id = $1',
@@ -241,6 +278,7 @@ export const updateSchema = async (req: Request, res: Response) => {
 
   try {
     await client.query('BEGIN');
+    const plan = await getPlanFeaturesForUser(userId, req.user?.plan_id);
 
     const schemaResult = await client.query<Schema>(
       'SELECT id, user_id, current_version_id FROM Schemas WHERE id = $1',
@@ -303,6 +341,7 @@ export const updateSchema = async (req: Request, res: Response) => {
 
     let createdNewVersion = false;
     if (schema_json !== undefined) {
+      await cleanupExpiredVersions(client, schemaId, plan.version_retention_days);
       const normalizedIncoming = normalizeSchemaJson(schema_json);
       let normalizedCurrent = '';
 
@@ -395,6 +434,8 @@ export const getSchemaVersions = async (req: Request, res: Response) => {
       return res.status(403).json({ message: 'You can only view versions of your own diagrams.' });
     }
 
+    await cleanupExpiredVersions(pool, schemaId, plan.version_retention_days);
+
     const versionsResult = await pool.query<SchemaVersionListRow>(
       `SELECT id, schema_id, version_number, schema_json, notes, created_at, created_by_user_id
        FROM SchemaVersions
@@ -450,6 +491,8 @@ export const getSchemaVersionDetails = async (req: Request, res: Response) => {
     if (schemaResult.rows[0].user_id !== userId) {
       return res.status(403).json({ message: 'You can only view versions of your own diagrams.' });
     }
+
+    await cleanupExpiredVersions(pool, schemaId, plan.version_retention_days);
 
     const versionResult = await pool.query<SchemaVersion>(
       `SELECT id, schema_id, version_number, schema_json, notes, created_at, created_by_user_id

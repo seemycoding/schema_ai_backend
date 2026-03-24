@@ -34,6 +34,10 @@ max_memory_messages INTEGER NOT NULL DEFAULT 20,
 
 context_window_messages INTEGER NOT NULL DEFAULT 12,
 
+max_collaborators_per_diagram INTEGER,
+
+version_retention_days INTEGER,
+
 price DECIMAL(10,2) NOT NULL,
 
 description TEXT,
@@ -185,6 +189,22 @@ role VARCHAR(16) NOT NULL CHECK (role IN ('user','system')),
 content TEXT NOT NULL,
 
 client_message_id VARCHAR(128),
+
+created_at TIMESTAMP NOT NULL DEFAULT NOW()
+
+);
+
+CREATE TABLE PasswordResetTokens (
+
+id BIGSERIAL PRIMARY KEY NOT NULL,
+
+user_id INTEGER NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+
+token_hash VARCHAR(255) NOT NULL,
+
+expires_at TIMESTAMP NOT NULL,
+
+used_at TIMESTAMP,
 
 created_at TIMESTAMP NOT NULL DEFAULT NOW()
 

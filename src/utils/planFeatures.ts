@@ -6,6 +6,8 @@ export interface PlanFeatures {
   max_diagrams: number | null;
   max_memory_messages: number;
   context_window_messages: number;
+  max_collaborators_per_diagram: number | null;
+  version_retention_days: number | null;
   has_collaboration: boolean;
   has_version_history: boolean;
   price: number;
@@ -18,6 +20,8 @@ interface UserPlanRow {
   max_diagrams: number | null;
   max_memory_messages: number | null;
   context_window_messages: number | null;
+  max_collaborators_per_diagram: number | null;
+  version_retention_days: number | null;
   has_collaboration: boolean | null;
   has_version_history: boolean | null;
   price: string | number | null;
@@ -30,6 +34,8 @@ const FALLBACK_PLAN_FEATURES: Record<number, PlanFeatures> = {
     max_diagrams: 6,
     max_memory_messages: 20,
     context_window_messages: 12,
+    max_collaborators_per_diagram: 0,
+    version_retention_days: 0,
     has_collaboration: false,
     has_version_history: false,
     price: 0,
@@ -41,6 +47,8 @@ const FALLBACK_PLAN_FEATURES: Record<number, PlanFeatures> = {
     max_diagrams: null,
     max_memory_messages: 200,
     context_window_messages: 80,
+    max_collaborators_per_diagram: 5,
+    version_retention_days: 7,
     has_collaboration: true,
     has_version_history: true,
     price: 19,
@@ -52,6 +60,8 @@ const FALLBACK_PLAN_FEATURES: Record<number, PlanFeatures> = {
     max_diagrams: null,
     max_memory_messages: 200,
     context_window_messages: 80,
+    max_collaborators_per_diagram: null,
+    version_retention_days: null,
     has_collaboration: true,
     has_version_history: true,
     price: 49,
@@ -63,6 +73,8 @@ const FALLBACK_PLAN_FEATURES: Record<number, PlanFeatures> = {
     max_diagrams: 6,
     max_memory_messages: 20,
     context_window_messages: 12,
+    max_collaborators_per_diagram: 0,
+    version_retention_days: 0,
     has_collaboration: false,
     has_version_history: false,
     price: 0,
@@ -91,6 +103,8 @@ export const getPlanFeaturesForUser = async (
       p.max_diagrams,
       p.max_memory_messages,
       p.context_window_messages,
+      p.max_collaborators_per_diagram,
+      p.version_retention_days,
       p.has_collaboration,
       p.has_version_history,
       p.price
@@ -117,6 +131,18 @@ export const getPlanFeaturesForUser = async (
       row.context_window_messages !== null && row.context_window_messages > 0
         ? row.context_window_messages
         : getFallbackPlanFeatures(row.user_plan_id || tokenPlanId || 4).context_window_messages;
+    const maxCollaboratorsPerDiagram =
+      row.max_collaborators_per_diagram === null
+        ? null
+        : row.max_collaborators_per_diagram >= 0
+          ? row.max_collaborators_per_diagram
+          : getFallbackPlanFeatures(row.user_plan_id || tokenPlanId || 4).max_collaborators_per_diagram;
+    const versionRetentionDays =
+      row.version_retention_days === null
+        ? null
+        : row.version_retention_days >= 0
+          ? row.version_retention_days
+          : getFallbackPlanFeatures(row.user_plan_id || tokenPlanId || 4).version_retention_days;
     const hasCollaboration = Boolean(row.has_collaboration);
     const hasVersionHistory = Boolean(row.has_version_history);
     const price = toNumber(row.price);
@@ -127,6 +153,8 @@ export const getPlanFeaturesForUser = async (
       max_diagrams: maxDiagrams,
       max_memory_messages: maxMemoryMessages,
       context_window_messages: contextWindowMessages,
+      max_collaborators_per_diagram: maxCollaboratorsPerDiagram,
+      version_retention_days: versionRetentionDays,
       has_collaboration: hasCollaboration,
       has_version_history: hasVersionHistory,
       price,
